@@ -1,0 +1,111 @@
+ESP32 Dev Kit (38 pins) ×1
+nRF24L01+ PA+LNA ×1
+Antenna 2.4GHz SMA ×1
+OLED 0.96" I2C ×1
+IR LED 940nm ×2
+IR Receiver TSOP38238 ×1
+Transistor BC547 ×1
+LED Kijani 5mm ×1
+LED Nyekundu 5mm ×1
+Tactile Button 6x6mm ×5
+Capacitor 100µF 16V ×1
+Resistor 220Ω ×2
+Resistor 10kΩ ×5
+Resistor 1kΩ ×1
+Resistor 10Ω ×2
+Jumper Wires Female-Female ×20
+Jumper Wires Male-Female ×10
+Jumper Wires Male-Male ×10
+Header Pins Female 40pin ×1
+Power Bank 5V USB ×1
+USB Cable USB-A to Micro-USB ×1
+Plastic Enclosure 150x90x50mm ×1
+Stripboard 10x15cm ×1
+
+ESP32 Dev Kit (38 pins)
+│
+├── POWER
+│   ├── 3.3V ──► nRF24 VCC, OLED VCC, IR Receiver VCC, LEDs VCC
+│   ├── 5V   ──► IR LED Circuit (kupitia transistor)
+│   └── GND  ──► GND zote
+│
+├── nRF24L01+ PA+LNA
+│   ├── VCC  ──► 3.3V
+│   ├── GND  ──► GND
+│   ├── CE   ──► GPIO 17
+│   ├── CSN  ──► GPIO 5
+│   ├── SCK  ──► GPIO 18
+│   ├── MOSI ──► GPIO 23
+│   └── MISO ──► GPIO 19
+│   └── Capacitor 100µF kati ya VCC na GND
+│   └── Antenna 2.4GHz SMA
+│
+├── OLED 0.96" I2C
+│   ├── VCC  ──► 3.3V
+│   ├── GND  ──► GND
+│   ├── SCL  ──► GPIO 22
+│   └── SDA  ──► GPIO 21
+│
+├── IR LED Circuit (2 LEDs - Parallel)
+│   │
+│   ├── GPIO 33 ──► 1kΩ ──► Base (BC547)
+│   │
+│   ├── BC547 Transistor
+│   │   ├── Base ──► 1kΩ ──► GPIO 33
+│   │   ├── Emitter ──► GND
+│   │   └── Collector ──► IR LEDs
+│   │
+│   ├── IR LED 1
+│   │   ├── Anode ──► Collector (BC547)
+│   │   ├── Cathode ──► 10Ω ──► GND
+│   │
+│   └── IR LED 2
+│       ├── Anode ──► Collector (BC547)
+│       └── Cathode ──► 10Ω ──► GND
+│
+├── IR Receiver TSOP38238
+│   ├── OUT ──► GPIO 16
+│   ├── VCC ──► 3.3V
+│   ├── GND ──► GND
+│   └── Resistor 10kΩ kati ya OUT na 3.3V
+│
+├── LEDs
+│   ├── LED Kijani (Status)
+│   │   ├── Anode ──► GPIO 2
+│   │   ├── Cathode ──► GND
+│   │   └── Resistor 220Ω
+│   │
+│   └── LED Nyekundu (Active)
+│       ├── Anode ──► GPIO 25
+│       ├── Cathode ──► GND
+│       └── Resistor 220Ω
+│
+├── Buttons (5x)
+│   ├── Button UP
+│   │   ├── Pin1 ──► GPIO 36
+│   │   ├── Pin2 ──► GND
+│   │   └── Resistor 10kΩ kati ya GPIO 36 na 3.3V
+│   │
+│   ├── Button DOWN
+│   │   ├── Pin1 ──► GPIO 34
+│   │   ├── Pin2 ──► GND
+│   │   └── Resistor 10kΩ kati ya GPIO 34 na 3.3V
+│   │
+│   ├── Button LEFT
+│   │   ├── Pin1 ──► GPIO 39
+│   │   ├── Pin2 ──► GND
+│   │   └── Resistor 10kΩ kati ya GPIO 39 na 3.3V
+│   │
+│   ├── Button RIGHT
+│   │   ├── Pin1 ──► GPIO 35
+│   │   ├── Pin2 ──► GND
+│   │   └── Resistor 10kΩ kati ya GPIO 35 na 3.3V
+│   │
+│   └── Button SELECT
+│       ├── Pin1 ──► GPIO 0
+│       ├── Pin2 ──► GND
+│       └── Resistor 10kΩ kati ya GPIO 0 na 3.3V
+│
+└── Power
+    ├── Power Bank 5V ──► ESP32 Micro USB
+    └── USB Cable
